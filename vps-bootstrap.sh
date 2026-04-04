@@ -13,6 +13,7 @@ set -euo pipefail
 SCRIPT_NAME="$(basename "$0")"
 
 TARGET_USER="app"
+USER_PASSWORD=""
 INSTALL_DOCKER="false"
 INSTALL_METATUBE="false"
 METATUBE_HOST_PORT="8080"
@@ -34,6 +35,7 @@ Usage:
 Options:
   -h, --help                      Show this help
   --username <name>               Linux user to create/use (default: app)
+  --user-password <password>      Initial password for the created user (optional)
   --install-docker <true|false>   Install Docker (default: false)
   --install-metatube <true|false> Install MetaTube (default: false; requires Docker)
   --metatube-host-port <port>     Host port for MetaTube (container is fixed to 8080)
@@ -70,6 +72,10 @@ parse_args() {
         ;;
       --username)
         TARGET_USER="${2:-}"
+        shift 2
+        ;;
+      --user-password)
+        USER_PASSWORD="${2:-}"
         shift 2
         ;;
       --install-docker)
@@ -159,11 +165,19 @@ ensure_user() {
   else
     log "创建用户 ${TARGET_USER}"
     useradd -m -s /bin/bash "${TARGET_USER}"
-    # 生成随机初始密码并打印给用户；建议首次登录后立刻修改
+    # 优先使用传入密码；未传入时生成随机初始密码并打印
     local init_pass
-    init_pass="$(openssl rand -base64 18 | tr -d '\n')"
+    if [[ -n "${USER_PASSWORD}" ]]; then
+      init_pass="${USER_PASSWORD}"
+    else
+      init_pass="$(openssl rand -base64 18 | tr -d '\n')"
+    fi
     echo "${TARGET_USER}:${init_pass}" | chpasswd
-    log "用户 ${TARGET_USER} 初始密码: ${init_pass}"
+    if [[ -n "${USER_PASSWORD}" ]]; then
+      log "用户 ${TARGET_USER} 初始密码已按参数设置"
+    else
+      log "用户 ${TARGET_USER} 初始密码: ${init_pass}"
+    fi
   fi
 
   usermod -aG sudo "${TARGET_USER}"
@@ -233,12 +247,22 @@ configure_xray() {
   XRAY_UUID="$(cat /proc/sys/kernel/random/uuid)"
   XRAY_SHORT_ID="$(random_hex 4)"
 
-  local keys
-  keys="$(xray x25519)"
-  XRAY_PRIVATE_KEY="$(echo "${keys}" | awk '/Private key:/ {print $3}')"
-  XRAY_PUBLIC_KEY="$(echo "${keys}" | awk '/Public key:/ {print $3}')"
+  local keys xray_bin
+  xray_bin="$(command -v xray || true)"
+  if [[ -z "${xray_bin}" && -x /usr/local/bin/xray ]]; then
+    xray_bin="/usr/local/bin/xray"
+  fi
+  [[ -n "${xray_bin}" ]] || { err "未找到 xray 可执行文件"; exit 1; }
+
+  keys="$("${xray_bin}" x25519 2>/dev/null | tr -d '\r' || true)"
+  # 兼容不同版本输出：
+  # - Private key: xxx / Public key: xxx
+  # - PrivateKey: xxx / Password (PublicKey): xxx
+  XRAY_PRIVATE_KEY="$(echo "${keys}" | sed -nE 's/^[[:space:]]*Private[[:space:]_]*[Kk]ey:[[:space:]]*([A-Za-z0-9+/_=-]+).*/\1/p' | head -n1)"
+  XRAY_PUBLIC_KEY="$(echo "${keys}" | sed -nE 's/^[[:space:]]*(Public[[:space:]_]*[Kk]ey|Password \(PublicKey\)):[[:space:]]*([A-Za-z0-9+/_=-]+).*/\2/p' | head -n1)"
 
   if [[ -z "${XRAY_PRIVATE_KEY}" || -z "${XRAY_PUBLIC_KEY}" ]]; then
+    echo "${keys}" >&2
     err "生成 REALITY 密钥失败"
     exit 1
   fi
@@ -307,6 +331,7 @@ EOF
 
   systemctl daemon-reload
   systemctl enable --now xray
+  "${xray_bin}" run -test -config /usr/local/etc/xray/config.json
   systemctl restart xray
 }
 
@@ -320,6 +345,27 @@ install_docker() {
 
   systemctl enable --now docker
   usermod -aG docker "${TARGET_USER}" || true
+
+  if ! docker compose version >/dev/null 2>&1; then
+    log "检测到 docker compose 不可用，安装 docker-compose-plugin"
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update -y
+    apt-get install -y --no-install-recommends docker-compose-plugin
+  fi
+}
+
+allow_xray_port_firewall() {
+  # 仅在 ufw 已安装且可用时自动放行；不强制安装防火墙
+  if command -v ufw >/dev/null 2>&1; then
+    if ufw status >/dev/null 2>&1; then
+      if ! ufw status | grep -qE "(^|[[:space:]])${XRAY_PORT}(/tcp)?[[:space:]]"; then
+        log "检测到 UFW，自动放行 Xray 端口 ${XRAY_PORT}/tcp"
+        ufw allow "${XRAY_PORT}/tcp" >/dev/null 2>&1 || true
+      else
+        log "UFW 已包含 Xray 端口规则 ${XRAY_PORT}/tcp"
+      fi
+    fi
+  fi
 }
 
 install_metatube() {
@@ -456,6 +502,7 @@ main() {
   ensure_xdg_dirs
   install_xray
   configure_xray
+  allow_xray_port_firewall
 
   if [[ "${INSTALL_DOCKER}" == "true" ]]; then
     install_docker
