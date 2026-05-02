@@ -7,27 +7,35 @@ TIMEZONE="Asia/Shanghai"
 TARGET_USER=""
 USER_PASSWORD=""
 BASE_DOMAIN=""
-ENABLE_METATUBE="false"
-METATUBE_TOKEN=""
-ENABLE_PLAYWRIGHT="false"
-PLAYWRIGHT_PORT=""
+
+XRAY_MODE="" # vmess_ws_tls | vless_reality
 XRAY_PORT=""
+
+ENABLE_METATUBE=""
+METATUBE_TOKEN=""
+ENABLE_PLAYWRIGHT=""
+PLAYWRIGHT_PORT=""
+ENABLE_WATCHTOWER=""
 
 REALITY_SERVER_NAME="www.cloudflare.com"
 REALITY_DEST="www.cloudflare.com:443"
+REALITY_UUID=""
+REALITY_SHORT_ID=""
+REALITY_PRIVATE_KEY=""
+REALITY_PUBLIC_KEY=""
 
-XRAY_UUID=""
-XRAY_SHORT_ID=""
-XRAY_PRIVATE_KEY=""
-XRAY_PUBLIC_KEY=""
+VMESS_UUID=""
+VMESS_PATH=""
 
 PUBLIC_IP=""
-VLESS_URL=""
+XRAY_SHARE_LINK=""
 
 OUTPUT_DIR="/root/bootstrap-output"
 TIMESTAMP="$(date +%Y%m%d-%H%M%S)"
 OUTPUT_FILE="${OUTPUT_DIR}/result-${TIMESTAMP}.txt"
 LATEST_FILE="${OUTPUT_DIR}/latest.txt"
+
+NON_INTERACTIVE="false"
 
 usage() {
   cat <<USAGE
@@ -35,30 +43,46 @@ Usage:
   sudo bash ${SCRIPT_NAME} [options]
 
 Options:
-  -h, --help                     Show this help
-  --username <name>              Target Linux user (optional; auto-detect in sudo mode)
-  --base-domain <domain>         Base domain, e.g. vps.master.zeayii.org
-  --enable-metatube <true|false> Deploy metatube + postgres + caddy + watchtower (default: false)
-  --metatube-token <token>       Token used by metatube (required when metatube=true)
-  --enable-playwright <true|false>Enable playwright reverse-proxy entry (default: false)
-  --playwright-port <port>       Playwright service local port (required when playwright=true)
-  --xray-port <port>             Fixed xray port (default: random free port)
+  -h, --help                       Show help
+  --username <name>                Target Linux user
+  --xray-mode <vmess_ws_tls|vless_reality>
+  --xray-port <port>               Fixed xray inbound port
+  --base-domain <domain>           Base domain (required for vmess_ws_tls/metatube/playwright)
+  --enable-metatube <true|false>
+  --metatube-token <token>
+  --enable-playwright <true|false>
+  --playwright-port <port>
+  --enable-watchtower <true|false>
 
 Notes:
-  - xray is always installed and uses IP + port in share link.
-  - playwright image/container is NOT installed by this script; only caddy route + firewall rule are managed.
+  - No arguments => forced interactive wizard.
+  - Baseline steps always executed: user + XDG + xray + firewall.
 USAGE
 }
 
 log() { printf '[INFO] %s\n' "$*"; }
 err() { printf '[ERROR] %s\n' "$*" >&2; }
 
-validate_bool() {
-  local v="$1"; local k="$2"
-  if [[ "$v" != "true" && "$v" != "false" ]]; then
-    err "$k 必须是 true 或 false"
+require_root() {
+  if [[ "${EUID}" -ne 0 ]]; then
+    err "必须使用 root/sudo 运行，例如：sudo bash ${SCRIPT_NAME}"
     exit 1
   fi
+}
+
+check_os() {
+  [[ -f /etc/os-release ]] || { err "缺少 /etc/os-release"; exit 1; }
+  # shellcheck disable=SC1091
+  . /etc/os-release
+  case "${ID:-}" in
+    ubuntu|debian) ;;
+    *) err "仅支持 Debian/Ubuntu，当前: ${ID:-unknown}"; exit 1 ;;
+  esac
+}
+
+validate_bool() {
+  local v="$1"; local k="$2"
+  [[ "$v" == "true" || "$v" == "false" ]] || { err "$k 必须是 true 或 false"; exit 1; }
 }
 
 is_valid_port() {
@@ -66,27 +90,13 @@ is_valid_port() {
   [[ "$p" =~ ^[0-9]+$ ]] && (( p >= 1 && p <= 65535 ))
 }
 
-require_root() {
-  if [[ "${EUID}" -ne 0 ]]; then
-    err "必须使用 root/sudo 执行，例如：sudo bash ${SCRIPT_NAME}"
-    exit 1
-  fi
-}
-
-check_os() {
-  if [[ ! -f /etc/os-release ]]; then
-    err "无法识别系统（缺少 /etc/os-release）"
-    exit 1
-  fi
-  # shellcheck disable=SC1091
-  . /etc/os-release
-  case "${ID:-}" in
-    ubuntu|debian) ;;
-    *) err "仅支持 Debian/Ubuntu，当前系统: ${ID:-unknown}"; exit 1 ;;
-  esac
-}
-
 parse_args() {
+  if [[ $# -eq 0 ]]; then
+    NON_INTERACTIVE="false"
+    return 0
+  fi
+  NON_INTERACTIVE="true"
+
   while [[ $# -gt 0 ]]; do
     case "$1" in
       -h|--help)
@@ -95,6 +105,14 @@ parse_args() {
         ;;
       --username)
         TARGET_USER="${2:-}"
+        shift 2
+        ;;
+      --xray-mode)
+        XRAY_MODE="${2:-}"
+        shift 2
+        ;;
+      --xray-port)
+        XRAY_PORT="${2:-}"
         shift 2
         ;;
       --base-domain)
@@ -117,8 +135,8 @@ parse_args() {
         PLAYWRIGHT_PORT="${2:-}"
         shift 2
         ;;
-      --xray-port)
-        XRAY_PORT="${2:-}"
+      --enable-watchtower)
+        ENABLE_WATCHTOWER="${2:-}"
         shift 2
         ;;
       *)
@@ -127,6 +145,37 @@ parse_args() {
         exit 1
         ;;
     esac
+  done
+}
+
+ask_yes_no() {
+  local prompt="$1" default="$2" ans=""
+  while true; do
+    read -r -p "${prompt} [${default}] " ans
+    ans="${ans:-$default}"
+    case "${ans,,}" in
+      y|yes|true) echo "true"; return 0 ;;
+      n|no|false) echo "false"; return 0 ;;
+      *) echo "请输入 y/n" ;;
+    esac
+  done
+}
+
+ask_non_empty() {
+  local prompt="$1" v=""
+  while true; do
+    read -r -p "$prompt" v
+    [[ -n "$v" ]] && { echo "$v"; return 0; }
+    echo "输入不能为空"
+  done
+}
+
+ask_port() {
+  local prompt="$1" p=""
+  while true; do
+    read -r -p "$prompt" p
+    is_valid_port "$p" && { echo "$p"; return 0; }
+    echo "端口必须是 1-65535"
   done
 }
 
@@ -141,65 +190,112 @@ prompt_confirmed_password() {
       USER_PASSWORD="$p1"
       return 0
     fi
-    err "两次输入不一致或为空，请重试。"
+    err "两次输入不一致或为空，请重试"
   done
 }
 
 resolve_target_user() {
   if [[ -n "$TARGET_USER" ]]; then
-    return 0
+    return
   fi
 
   if [[ -n "${SUDO_USER:-}" && "${SUDO_USER}" != "root" ]]; then
     TARGET_USER="${SUDO_USER}"
     log "检测到 sudo 用户: ${TARGET_USER}"
-    return 0
+    return
   fi
 
-  if [[ "$(id -un)" == "root" ]]; then
-    read -r -p "当前为 root 直接执行，请输入目标用户名: " TARGET_USER
-    if [[ -z "$TARGET_USER" ]]; then
-      err "用户名不能为空"
-      exit 1
-    fi
-    return 0
-  fi
-
-  err "无法识别目标用户，请使用 --username 指定"
-  exit 1
+  TARGET_USER="$(ask_non_empty '请输入目标用户名: ')"
 }
 
-validate_inputs() {
-  [[ -n "$TARGET_USER" ]] || { err "目标用户名为空"; exit 1; }
-  validate_bool "$ENABLE_METATUBE" "--enable-metatube"
-  validate_bool "$ENABLE_PLAYWRIGHT" "--enable-playwright"
-
-  if [[ -n "$XRAY_PORT" ]] && ! is_valid_port "$XRAY_PORT"; then
-    err "--xray-port 必须是 1-65535"
-    exit 1
+interactive_wizard_if_needed() {
+  if [[ "$NON_INTERACTIVE" != "false" ]]; then
+    return
   fi
 
-  if [[ "$ENABLE_METATUBE" == "true" || "$ENABLE_PLAYWRIGHT" == "true" ]]; then
+  echo
+  echo "===== 交互向导 ====="
+
+  if [[ -z "$XRAY_MODE" ]]; then
+    echo "请选择 Xray 协议："
+    echo "1) vmess + ws + tls (默认)"
+    echo "2) vless + reality + tcp"
+    local pick=""
+    while true; do
+      read -r -p "输入 1 或 2 [1]: " pick
+      pick="${pick:-1}"
+      case "$pick" in
+        1) XRAY_MODE="vmess_ws_tls"; break ;;
+        2) XRAY_MODE="vless_reality"; break ;;
+        *) echo "请输入 1 或 2" ;;
+      esac
+    done
+  fi
+
+  if [[ -z "$XRAY_PORT" ]]; then
+    read -r -p "Xray 端口（留空自动随机）: " XRAY_PORT
+  fi
+
+  if [[ -z "$ENABLE_METATUBE" ]]; then
+    ENABLE_METATUBE="$(ask_yes_no '是否安装 MetaTube + Postgres?' 'n')"
+  fi
+
+  if [[ -z "$ENABLE_PLAYWRIGHT" ]]; then
+    ENABLE_PLAYWRIGHT="$(ask_yes_no '是否配置 Playwright 反向代理入口?' 'n')"
+  fi
+
+  if [[ "$ENABLE_METATUBE" == "true" || "$ENABLE_PLAYWRIGHT" == "true" || "$XRAY_MODE" == "vmess_ws_tls" ]]; then
     if [[ -z "$BASE_DOMAIN" ]]; then
-      read -r -p "请输入基础域名（如 vps.master.zeayii.org）: " BASE_DOMAIN
+      BASE_DOMAIN="$(ask_non_empty '请输入基础域名（如 jp.server.master.zeayii.org）: ')"
     fi
-    [[ -n "$BASE_DOMAIN" ]] || { err "基础域名不能为空"; exit 1; }
   fi
 
   if [[ "$ENABLE_METATUBE" == "true" && -z "$METATUBE_TOKEN" ]]; then
     read -r -s -p "请输入 MetaTube TOKEN: " METATUBE_TOKEN
     echo
-    [[ -n "$METATUBE_TOKEN" ]] || { err "MetaTube TOKEN 不能为空"; exit 1; }
+  fi
+
+  if [[ "$ENABLE_PLAYWRIGHT" == "true" && -z "$PLAYWRIGHT_PORT" ]]; then
+    PLAYWRIGHT_PORT="$(ask_port '请输入 Playwright 内部端口: ')"
+  fi
+
+  if [[ -z "$ENABLE_WATCHTOWER" ]]; then
+    ENABLE_WATCHTOWER="$(ask_yes_no '是否安装 Watchtower?' 'y')"
+  fi
+}
+
+validate_inputs() {
+  [[ -n "$TARGET_USER" ]] || { err "目标用户名为空"; exit 1; }
+
+  case "$XRAY_MODE" in
+    vmess_ws_tls|vless_reality) ;;
+    "") XRAY_MODE="vmess_ws_tls" ;;
+    *) err "--xray-mode 仅支持 vmess_ws_tls 或 vless_reality"; exit 1 ;;
+  esac
+
+  if [[ -n "$XRAY_PORT" ]] && ! is_valid_port "$XRAY_PORT"; then
+    err "--xray-port 非法"
+    exit 1
+  fi
+
+  if [[ -z "$ENABLE_METATUBE" ]]; then ENABLE_METATUBE="false"; fi
+  if [[ -z "$ENABLE_PLAYWRIGHT" ]]; then ENABLE_PLAYWRIGHT="false"; fi
+  if [[ -z "$ENABLE_WATCHTOWER" ]]; then ENABLE_WATCHTOWER="true"; fi
+
+  validate_bool "$ENABLE_METATUBE" "--enable-metatube"
+  validate_bool "$ENABLE_PLAYWRIGHT" "--enable-playwright"
+  validate_bool "$ENABLE_WATCHTOWER" "--enable-watchtower"
+
+  if [[ "$XRAY_MODE" == "vmess_ws_tls" || "$ENABLE_METATUBE" == "true" || "$ENABLE_PLAYWRIGHT" == "true" ]]; then
+    [[ -n "$BASE_DOMAIN" ]] || { err "需要 --base-domain"; exit 1; }
+  fi
+
+  if [[ "$ENABLE_METATUBE" == "true" ]]; then
+    [[ -n "$METATUBE_TOKEN" ]] || { err "启用 metatube 时必须提供 --metatube-token 或交互输入"; exit 1; }
   fi
 
   if [[ "$ENABLE_PLAYWRIGHT" == "true" ]]; then
-    if [[ -z "$PLAYWRIGHT_PORT" ]]; then
-      read -r -p "请输入 Playwright 本机服务端口: " PLAYWRIGHT_PORT
-    fi
-    if ! is_valid_port "$PLAYWRIGHT_PORT"; then
-      err "Playwright 端口必须是 1-65535"
-      exit 1
-    fi
+    is_valid_port "$PLAYWRIGHT_PORT" || { err "playwright 端口非法"; exit 1; }
   fi
 }
 
@@ -209,8 +305,7 @@ install_base_packages() {
   apt-get update -y
   apt-get install -y --no-install-recommends \
     ca-certificates curl wget gnupg lsb-release \
-    tar unzip xz-utils jq qrencode openssl passwd \
-    ufw
+    tar unzip xz-utils jq qrencode openssl passwd ufw
 }
 
 set_timezone() {
@@ -229,13 +324,10 @@ ensure_user() {
   else
     log "创建用户 ${TARGET_USER}"
     useradd -m -s /bin/bash "$TARGET_USER"
-    if [[ -z "$USER_PASSWORD" ]]; then
-      prompt_confirmed_password
-    fi
+    [[ -n "$USER_PASSWORD" ]] || prompt_confirmed_password
     echo "${TARGET_USER}:${USER_PASSWORD}" | chpasswd
-    log "用户 ${TARGET_USER} 创建完成"
   fi
-  usermod -aG sudo "$TARGET_USER"
+  usermod -aG sudo "$TARGET_USER" || true
 }
 
 ensure_xdg_dirs() {
@@ -268,50 +360,35 @@ pick_free_port() {
   exit 1
 }
 
-random_hex() {
-  local bytes="${1:-16}"
-  openssl rand -hex "$bytes" | tr -d '\n'
-}
+random_hex() { openssl rand -hex "${1:-16}" | tr -d '\n'; }
 
 detect_public_ip() {
   local ip=""
   ip="$(curl -4fsSL --max-time 8 https://api.ipify.org || true)"
-  if [[ -z "$ip" ]]; then
-    ip="$(curl -4fsSL --max-time 8 https://ifconfig.me || true)"
-  fi
-  if [[ -z "$ip" ]]; then
-    ip="$(hostname -I | awk '{print $1}')"
-  fi
+  [[ -n "$ip" ]] || ip="$(curl -4fsSL --max-time 8 https://ifconfig.me || true)"
+  [[ -n "$ip" ]] || ip="$(hostname -I | awk '{print $1}')"
   echo "$ip"
 }
 
 install_xray() {
-  log "安装 Xray Core"
+  log "安装 Xray"
   bash <(curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh) install
 }
 
-configure_xray() {
-  log "生成 Xray VLESS+REALITY 配置"
-  if [[ -z "$XRAY_PORT" ]]; then
-    XRAY_PORT="$(pick_free_port)"
-  fi
-  XRAY_UUID="$(cat /proc/sys/kernel/random/uuid)"
-  XRAY_SHORT_ID="$(random_hex 4)"
+configure_xray_vless_reality() {
+  REALITY_UUID="$(cat /proc/sys/kernel/random/uuid)"
+  REALITY_SHORT_ID="$(random_hex 4)"
 
-  local keys xray_bin
+  local xray_bin keys
   xray_bin="$(command -v xray || true)"
-  if [[ -z "$xray_bin" && -x /usr/local/bin/xray ]]; then
-    xray_bin="/usr/local/bin/xray"
-  fi
-  [[ -n "$xray_bin" ]] || { err "未找到 xray 可执行文件"; exit 1; }
+  [[ -x "$xray_bin" ]] || xray_bin="/usr/local/bin/xray"
 
   keys="$(${xray_bin} x25519 2>/dev/null | tr -d '\r' || true)"
-  XRAY_PRIVATE_KEY="$(echo "$keys" | sed -nE 's/^[[:space:]]*Private[[:space:]_]*[Kk]ey:[[:space:]]*([A-Za-z0-9+/_=-]+).*/\1/p' | head -n1)"
-  XRAY_PUBLIC_KEY="$(echo "$keys" | sed -nE 's/^[[:space:]]*(Public[[:space:]_]*[Kk]ey|Password \(PublicKey\)):[[:space:]]*([A-Za-z0-9+/_=-]+).*/\2/p' | head -n1)"
+  REALITY_PRIVATE_KEY="$(echo "$keys" | sed -nE 's/^[[:space:]]*Private[[:space:]_]*[Kk]ey:[[:space:]]*([A-Za-z0-9+/_=-]+).*/\1/p' | head -n1)"
+  REALITY_PUBLIC_KEY="$(echo "$keys" | sed -nE 's/^[[:space:]]*(Public[[:space:]_]*[Kk]ey|Password \(PublicKey\)):[[:space:]]*([A-Za-z0-9+/_=-]+).*/\2/p' | head -n1)"
 
-  [[ -n "$XRAY_PRIVATE_KEY" && -n "$XRAY_PUBLIC_KEY" ]] || { err "生成 REALITY 密钥失败"; exit 1; }
+  [[ -n "$REALITY_PRIVATE_KEY" && -n "$REALITY_PUBLIC_KEY" ]] || { err "生成 REALITY 密钥失败"; exit 1; }
 
-  install -d -m 755 /usr/local/etc/xray
   cat > /usr/local/etc/xray/config.json <<JSON
 {
   "log": { "loglevel": "warning" },
@@ -321,7 +398,7 @@ configure_xray() {
       "port": ${XRAY_PORT},
       "protocol": "vless",
       "settings": {
-        "clients": [{ "id": "${XRAY_UUID}", "flow": "xtls-rprx-vision" }],
+        "clients": [{ "id": "${REALITY_UUID}", "flow": "xtls-rprx-vision" }],
         "decryption": "none"
       },
       "streamSettings": {
@@ -332,49 +409,145 @@ configure_xray() {
           "dest": "${REALITY_DEST}",
           "xver": 0,
           "serverNames": ["${REALITY_SERVER_NAME}"],
-          "privateKey": "${XRAY_PRIVATE_KEY}",
-          "shortIds": ["${XRAY_SHORT_ID}"]
+          "privateKey": "${REALITY_PRIVATE_KEY}",
+          "shortIds": ["${REALITY_SHORT_ID}"]
         }
       }
     }
   ],
-  "outbounds": [
-    { "protocol": "freedom", "tag": "direct" },
-    { "protocol": "blackhole", "tag": "block" }
-  ]
+  "outbounds": [{ "protocol": "freedom" }]
 }
 JSON
 
-  "${xray_bin}" run -test -config /usr/local/etc/xray/config.json
+  XRAY_SHARE_LINK="vless://${REALITY_UUID}@${PUBLIC_IP}:${XRAY_PORT}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${REALITY_SERVER_NAME}&fp=chrome&pbk=${REALITY_PUBLIC_KEY}&sid=${REALITY_SHORT_ID}&type=tcp&headerType=none#xray-vless-reality"
+}
+
+configure_xray_vmess_ws_tls() {
+  VMESS_UUID="$(cat /proc/sys/kernel/random/uuid)"
+  VMESS_PATH="/$(random_hex 6)"
+
+  cat > /usr/local/etc/xray/config.json <<JSON
+{
+  "log": { "loglevel": "warning" },
+  "inbounds": [
+    {
+      "listen": "127.0.0.1",
+      "port": ${XRAY_PORT},
+      "protocol": "vmess",
+      "settings": {
+        "clients": [{ "id": "${VMESS_UUID}", "alterId": 0 }]
+      },
+      "streamSettings": {
+        "network": "ws",
+        "wsSettings": { "path": "${VMESS_PATH}" }
+      }
+    }
+  ],
+  "outbounds": [{ "protocol": "freedom" }]
+}
+JSON
+
+  XRAY_SHARE_LINK="vmess://$(printf '{\"v\":\"2\",\"ps\":\"xray-vmess-ws-tls\",\"add\":\"xray.%s\",\"port\":\"443\",\"id\":\"%s\",\"aid\":\"0\",\"scy\":\"auto\",\"net\":\"ws\",\"type\":\"none\",\"host\":\"xray.%s\",\"path\":\"%s\",\"tls\":\"tls\",\"sni\":\"xray.%s\",\"alpn\":\"\"}' "$BASE_DOMAIN" "$VMESS_UUID" "$BASE_DOMAIN" "$VMESS_PATH" "$BASE_DOMAIN" | base64 -w0)"
+}
+
+configure_xray() {
+  install -d -m 755 /usr/local/etc/xray
+  PUBLIC_IP="$(detect_public_ip)"
+  [[ -n "$XRAY_PORT" ]] || XRAY_PORT="$(pick_free_port)"
+
+  case "$XRAY_MODE" in
+    vless_reality) configure_xray_vless_reality ;;
+    vmess_ws_tls) configure_xray_vmess_ws_tls ;;
+  esac
+
+  /usr/local/bin/xray run -test -config /usr/local/etc/xray/config.json
   systemctl enable --now xray
   systemctl restart xray
 }
 
 install_docker_and_compose() {
-  if command -v docker >/dev/null 2>&1; then
-    log "Docker 已安装"
-  else
+  if ! command -v docker >/dev/null 2>&1; then
     log "安装 Docker"
     curl -fsSL https://get.docker.com | sh
+  else
+    log "Docker 已安装"
   fi
   systemctl enable --now docker
   usermod -aG docker "$TARGET_USER" || true
 
   if ! docker compose version >/dev/null 2>&1; then
-    log "安装 docker-compose-plugin"
-    apt-get update -y
     apt-get install -y --no-install-recommends docker-compose-plugin
   fi
 }
 
-get_home() {
-  getent passwd "$TARGET_USER" | cut -d: -f6
-}
+get_home() { getent passwd "$TARGET_USER" | cut -d: -f6; }
 
 ensure_edge_network() {
-  if ! docker network inspect edge >/dev/null 2>&1; then
-    docker network create edge >/dev/null
-  fi
+  docker network inspect edge >/dev/null 2>&1 || docker network create edge >/dev/null
+}
+
+write_caddy_stack() {
+  local home_dir stack_dir compose_file caddyfile
+  home_dir="$(get_home)"
+  stack_dir="${home_dir}/.config/docker/stacks/caddy"
+  compose_file="${stack_dir}/compose.yaml"
+  caddyfile="${stack_dir}/Caddyfile"
+
+  install -d -m 755 -o "$TARGET_USER" -g "$TARGET_USER" "$stack_dir" "${home_dir}/.local/share/caddy/data" "${home_dir}/.config/caddy"
+
+  cat > "$compose_file" <<YAML
+services:
+  caddy:
+    image: caddy:latest
+    container_name: caddy
+    restart: unless-stopped
+    ports:
+      - "443:443"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ${stack_dir}/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ${home_dir}/.local/share/caddy/data:/data
+      - ${home_dir}/.config/caddy:/config
+    networks:
+      - edge
+
+networks:
+  edge:
+    external: true
+YAML
+
+  {
+    echo "{" 
+    echo "  email admin@${BASE_DOMAIN}" 
+    echo "}" 
+    echo
+
+    if [[ "$XRAY_MODE" == "vmess_ws_tls" ]]; then
+      echo "xray.${BASE_DOMAIN} {"
+      echo "  reverse_proxy 127.0.0.1:${XRAY_PORT}"
+      echo "}"
+      echo
+    fi
+
+    if [[ "$ENABLE_METATUBE" == "true" ]]; then
+      echo "metatube.${BASE_DOMAIN} {"
+      echo "  reverse_proxy metatube:8080"
+      echo "}"
+      echo
+    fi
+
+    if [[ "$ENABLE_PLAYWRIGHT" == "true" ]]; then
+      echo "playwright.service.${BASE_DOMAIN} {"
+      echo "  reverse_proxy host.docker.internal:${PLAYWRIGHT_PORT}"
+      echo "}"
+    fi
+  } > "$caddyfile"
+
+  chown "$TARGET_USER:$TARGET_USER" "$compose_file" "$caddyfile"
+  chmod 644 "$compose_file" "$caddyfile"
+
+  docker compose -f "$compose_file" up -d
 }
 
 write_metatube_stack() {
@@ -447,64 +620,6 @@ YAML
   docker compose --env-file "$env_file" -f "$compose_file" up -d
 }
 
-write_caddy_stack() {
-  local home_dir stack_dir compose_file caddyfile
-  home_dir="$(get_home)"
-  stack_dir="${home_dir}/.config/docker/stacks/caddy"
-  compose_file="${stack_dir}/compose.yaml"
-  caddyfile="${stack_dir}/Caddyfile"
-
-  install -d -m 755 -o "$TARGET_USER" -g "$TARGET_USER" "$stack_dir"
-  install -d -m 755 -o "$TARGET_USER" -g "$TARGET_USER" "${home_dir}/.local/share/caddy/data" "${home_dir}/.config/caddy"
-
-  cat > "$compose_file" <<YAML
-services:
-  caddy:
-    image: caddy:latest
-    container_name: caddy
-    restart: unless-stopped
-    ports:
-      - "443:443"
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    volumes:
-      - ${stack_dir}/Caddyfile:/etc/caddy/Caddyfile:ro
-      - ${home_dir}/.local/share/caddy/data:/data
-      - ${home_dir}/.config/caddy:/config
-    networks:
-      - edge
-
-networks:
-  edge:
-    external: true
-YAML
-
-  {
-    echo "{" 
-    echo "  email admin@${BASE_DOMAIN}" 
-    echo "}" 
-    echo
-
-    if [[ "$ENABLE_METATUBE" == "true" ]]; then
-      echo "metatube.${BASE_DOMAIN} {"
-      echo "  reverse_proxy metatube:8080"
-      echo "}"
-      echo
-    fi
-
-    if [[ "$ENABLE_PLAYWRIGHT" == "true" ]]; then
-      echo "playwright.service.${BASE_DOMAIN} {"
-      echo "  reverse_proxy host.docker.internal:${PLAYWRIGHT_PORT}"
-      echo "}"
-    fi
-  } > "$caddyfile"
-
-  chown "$TARGET_USER:$TARGET_USER" "$compose_file" "$caddyfile"
-  chmod 644 "$compose_file" "$caddyfile"
-
-  docker compose -f "$compose_file" up -d
-}
-
 write_watchtower_stack() {
   local home_dir stack_dir compose_file
   home_dir="$(get_home)"
@@ -529,45 +644,46 @@ YAML
   docker compose -f "$compose_file" up -d
 }
 
+precheck_conflicts() {
+  log "预检查"
+
+  if [[ -n "$XRAY_PORT" ]]; then
+    if ss -lnt "( sport = :${XRAY_PORT} )" | grep -q ":${XRAY_PORT}"; then
+      if ! systemctl is-active --quiet xray; then
+        err "xray 端口 ${XRAY_PORT} 已被占用"
+        exit 1
+      fi
+    fi
+  fi
+
+  if [[ "$XRAY_MODE" == "vmess_ws_tls" || "$ENABLE_METATUBE" == "true" || "$ENABLE_PLAYWRIGHT" == "true" ]]; then
+    if ss -lnt '( sport = :443 )' | grep -q ':443'; then
+      if ! docker ps --format '{{.Names}}' | grep -q '^caddy$'; then
+        err "443 端口已被其他服务占用，无法部署 caddy"
+        exit 1
+      fi
+    fi
+  fi
+
+  if [[ "$ENABLE_PLAYWRIGHT" == "true" ]]; then
+    if ! ss -lnt "( sport = :${PLAYWRIGHT_PORT} )" | grep -q ":${PLAYWRIGHT_PORT}"; then
+      log "提示: playwright ${PLAYWRIGHT_PORT} 尚未监听，反代会先创建，待服务启动后生效"
+    fi
+  fi
+}
+
 configure_ufw() {
-  log "配置 UFW 最小开放规则"
+  log "配置 UFW"
   ufw --force reset >/dev/null
   ufw default deny incoming >/dev/null
   ufw default allow outgoing >/dev/null
   ufw allow 22/tcp >/dev/null
   ufw allow 443/tcp >/dev/null
   ufw allow "${XRAY_PORT}/tcp" >/dev/null
-
   if [[ "$ENABLE_PLAYWRIGHT" == "true" ]]; then
     ufw allow "${PLAYWRIGHT_PORT}/tcp" >/dev/null
   fi
-
   ufw --force enable >/dev/null
-}
-
-precheck_conflicts() {
-  log "预检查端口冲突"
-  if [[ "$ENABLE_METATUBE" == "true" || "$ENABLE_PLAYWRIGHT" == "true" ]]; then
-    if ss -lnt '( sport = :443 )' | grep -q ':443'; then
-      if ! docker ps --format '{{.Names}}' | grep -q '^caddy$'; then
-        err "检测到 443 端口已被其他服务占用，无法部署 caddy"
-        exit 1
-      fi
-    fi
-  fi
-
-  if [[ -n "$XRAY_PORT" ]] && ss -lnt "( sport = :${XRAY_PORT} )" | grep -q ":${XRAY_PORT}"; then
-    if ! systemctl is-active --quiet xray; then
-      err "xray 端口 ${XRAY_PORT} 已占用"
-      exit 1
-    fi
-  fi
-
-  if [[ "$ENABLE_PLAYWRIGHT" == "true" ]]; then
-    if ! ss -lnt "( sport = :${PLAYWRIGHT_PORT} )" | grep -q ":${PLAYWRIGHT_PORT}"; then
-      log "提示: playwright 端口 ${PLAYWRIGHT_PORT} 当前未监听，caddy 路由会先创建，待你的私有服务启动后生效"
-    fi
-  fi
 }
 
 print_stage_summary() {
@@ -578,8 +694,11 @@ print_stage_summary() {
   echo "timezone=${TIMEZONE}"
   echo
   echo "[Xray]"
-  echo "install=true"
-  echo "xray_port=${XRAY_PORT:-random}"
+  echo "mode=${XRAY_MODE}"
+  echo "port=${XRAY_PORT:-random}"
+  if [[ "$XRAY_MODE" == "vmess_ws_tls" ]]; then
+    echo "domain=xray.${BASE_DOMAIN}"
+  fi
   echo
   echo "[MetaTube]"
   echo "enable=${ENABLE_METATUBE}"
@@ -594,20 +713,20 @@ print_stage_summary() {
     echo "origin_port=${PLAYWRIGHT_PORT}"
   fi
   echo
+  echo "[Watchtower]"
+  echo "enable=${ENABLE_WATCHTOWER}"
+  echo
   echo "[防火墙]"
-  echo "allow=22/tcp,443/tcp,${XRAY_PORT:-dynamic}/tcp${ENABLE_PLAYWRIGHT:+,${PLAYWRIGHT_PORT}/tcp}"
+  echo "allow=22/tcp,443/tcp,${XRAY_PORT:-dynamic}/tcp$( [[ "$ENABLE_PLAYWRIGHT" == "true" ]] && printf ',%s/tcp' "$PLAYWRIGHT_PORT" )"
   echo "=============================="
   echo
 }
 
 write_outputs() {
   local qrcode_file
-  PUBLIC_IP="$(detect_public_ip)"
-  VLESS_URL="vless://${XRAY_UUID}@${PUBLIC_IP}:${XRAY_PORT}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${REALITY_SERVER_NAME}&fp=chrome&pbk=${XRAY_PUBLIC_KEY}&sid=${XRAY_SHORT_ID}&type=tcp&headerType=none#vps-${PUBLIC_IP}"
-
   install -d -m 700 "$OUTPUT_DIR"
-  qrcode_file="${OUTPUT_DIR}/vless-${TIMESTAMP}.png"
-  qrencode -o "$qrcode_file" "$VLESS_URL" || true
+  qrcode_file="${OUTPUT_DIR}/xray-${TIMESTAMP}.png"
+  qrencode -o "$qrcode_file" "$XRAY_SHARE_LINK" || true
 
   cat > "$OUTPUT_FILE" <<EOF2
 [Meta]
@@ -616,23 +735,24 @@ target_user=${TARGET_USER}
 timezone=${TIMEZONE}
 
 [Xray]
+mode=${XRAY_MODE}
 public_ip=${PUBLIC_IP}
 port=${XRAY_PORT}
-uuid=${XRAY_UUID}
-reality_server_name=${REALITY_SERVER_NAME}
-reality_public_key=${XRAY_PUBLIC_KEY}
-reality_short_id=${XRAY_SHORT_ID}
-import_url=${VLESS_URL}
+share_link=${XRAY_SHARE_LINK}
+
+[Domain]
+base_domain=${BASE_DOMAIN}
+xray_domain=$( [[ "$XRAY_MODE" == "vmess_ws_tls" ]] && echo "xray.${BASE_DOMAIN}" || echo "" )
+metatube_domain=$( [[ "$ENABLE_METATUBE" == "true" ]] && echo "metatube.${BASE_DOMAIN}" || echo "" )
+playwright_domain=$( [[ "$ENABLE_PLAYWRIGHT" == "true" ]] && echo "playwright.service.${BASE_DOMAIN}" || echo "" )
+
+[Switch]
+metatube=${ENABLE_METATUBE}
+playwright=${ENABLE_PLAYWRIGHT}
+watchtower=${ENABLE_WATCHTOWER}
+
+[Artifact]
 qr_png=${qrcode_file}
-
-[MetaTube]
-enabled=${ENABLE_METATUBE}
-domain=$( [[ "$ENABLE_METATUBE" == "true" ]] && echo "metatube.${BASE_DOMAIN}" || echo "" )
-
-[Playwright]
-enabled=${ENABLE_PLAYWRIGHT}
-domain=$( [[ "$ENABLE_PLAYWRIGHT" == "true" ]] && echo "playwright.service.${BASE_DOMAIN}" || echo "" )
-origin_port=${PLAYWRIGHT_PORT}
 EOF2
 
   ln -sfn "$OUTPUT_FILE" "$LATEST_FILE"
@@ -643,14 +763,16 @@ EOF2
   echo "========================================="
   echo "结果文件: ${OUTPUT_FILE}"
   echo "快捷查看: ${LATEST_FILE}"
-  echo "分享链接: ${VLESS_URL}"
+  echo "分享链接: ${XRAY_SHARE_LINK}"
 }
 
 main() {
   parse_args "$@"
   require_root
   check_os
+
   resolve_target_user
+  interactive_wizard_if_needed
   validate_inputs
 
   install_base_packages
@@ -659,19 +781,26 @@ main() {
   ensure_xdg_dirs
 
   precheck_conflicts
+
+  if [[ "$XRAY_MODE" == "vmess_ws_tls" || "$ENABLE_METATUBE" == "true" || "$ENABLE_PLAYWRIGHT" == "true" ]]; then
+    install_docker_and_compose
+    ensure_edge_network
+  fi
+
   print_stage_summary
 
   install_xray
   configure_xray
 
-  if [[ "$ENABLE_METATUBE" == "true" || "$ENABLE_PLAYWRIGHT" == "true" ]]; then
-    install_docker_and_compose
-    ensure_edge_network
+  if [[ "$XRAY_MODE" == "vmess_ws_tls" || "$ENABLE_METATUBE" == "true" || "$ENABLE_PLAYWRIGHT" == "true" ]]; then
     write_caddy_stack
   fi
 
   if [[ "$ENABLE_METATUBE" == "true" ]]; then
     write_metatube_stack
+  fi
+
+  if [[ "$ENABLE_WATCHTOWER" == "true" ]]; then
     write_watchtower_stack
   fi
 
