@@ -16,6 +16,7 @@ METATUBE_TOKEN=""
 ENABLE_PLAYWRIGHT=""
 PLAYWRIGHT_PORT=""
 ENABLE_WATCHTOWER=""
+TCP_CC="bbr" # bbr | cubic | reno
 
 REALITY_SERVER_NAME="www.cloudflare.com"
 REALITY_DEST="www.cloudflare.com:443"
@@ -54,6 +55,7 @@ Options:
   --enable-playwright <true|false>
   --playwright-port <port>
   --enable-watchtower <true|false>
+  --tcp-cc <bbr|cubic|reno>       TCP congestion control (default: bbr)
 
 Notes:
   - No arguments => forced interactive wizard.
@@ -138,6 +140,10 @@ parse_args() {
         ;;
       --enable-watchtower)
         ENABLE_WATCHTOWER="${2:-}"
+        shift 2
+        ;;
+      --tcp-cc)
+        TCP_CC="${2:-}"
         shift 2
         ;;
       *)
@@ -331,6 +337,11 @@ validate_inputs() {
   validate_bool "$ENABLE_PLAYWRIGHT" "--enable-playwright"
   validate_bool "$ENABLE_WATCHTOWER" "--enable-watchtower"
 
+  case "$TCP_CC" in
+    bbr|cubic|reno) ;;
+    *) err "--tcp-cc 仅支持 bbr/cubic/reno"; exit 1 ;;
+  esac
+
   if [[ "$XRAY_MODE" == "vmess_ws_tls" || "$ENABLE_METATUBE" == "true" || "$ENABLE_PLAYWRIGHT" == "true" ]]; then
     [[ -n "$BASE_DOMAIN" ]] || { err "需要 --base-domain"; exit 1; }
   fi
@@ -342,6 +353,17 @@ validate_inputs() {
   if [[ "$ENABLE_PLAYWRIGHT" == "true" ]]; then
     is_valid_port "$PLAYWRIGHT_PORT" || { err "playwright 端口非法"; exit 1; }
   fi
+}
+
+configure_tcp_cc() {
+  log "配置 TCP 拥塞控制: ${TCP_CC}"
+
+  cat > /etc/sysctl.d/99-bootstrap-net.conf <<EOFCC
+net.core.default_qdisc=fq
+net.ipv4.tcp_congestion_control=${TCP_CC}
+EOFCC
+
+  sysctl --system >/dev/null
 }
 
 install_base_packages() {
@@ -761,6 +783,9 @@ print_stage_summary() {
   echo "[Watchtower]"
   echo "enable=${ENABLE_WATCHTOWER}"
   echo
+  echo "[Network]"
+  echo "tcp_cc=${TCP_CC}"
+  echo
   echo "[防火墙]"
   echo "allow=22/tcp,443/tcp,${XRAY_PORT:-dynamic}/tcp$( [[ "$ENABLE_PLAYWRIGHT" == "true" ]] && printf ',%s/tcp' "$PLAYWRIGHT_PORT" )"
   echo "=============================="
@@ -795,6 +820,9 @@ playwright_domain=$( [[ "$ENABLE_PLAYWRIGHT" == "true" ]] && echo "playwright.se
 metatube=${ENABLE_METATUBE}
 playwright=${ENABLE_PLAYWRIGHT}
 watchtower=${ENABLE_WATCHTOWER}
+
+[Network]
+tcp_cc=${TCP_CC}
 
 [Artifact]
 qr_png=${qrcode_file}
@@ -851,6 +879,7 @@ main() {
   fi
 
   configure_ufw
+  configure_tcp_cc
   write_outputs
   log "完成"
 }
