@@ -36,6 +36,7 @@ OUTPUT_FILE="${OUTPUT_DIR}/result-${TIMESTAMP}.txt"
 LATEST_FILE="${OUTPUT_DIR}/latest.txt"
 
 NON_INTERACTIVE="false"
+USE_WHIPTAIL="false"
 
 usage() {
   cat <<USAGE
@@ -161,6 +162,62 @@ ask_yes_no() {
   done
 }
 
+init_ui_mode() {
+  if [[ "$NON_INTERACTIVE" == "false" ]] && command -v whiptail >/dev/null 2>&1 && [[ -t 0 ]] && [[ -t 1 ]]; then
+    USE_WHIPTAIL="true"
+  fi
+}
+
+menu_xray_mode() {
+  local choice
+  if [[ "$USE_WHIPTAIL" == "true" ]]; then
+    choice="$(whiptail --title "Xray 协议选择" --menu "请选择 Xray 协议" 15 70 2 \
+      "vmess_ws_tls" "VMess + WS + TLS（默认）" \
+      "vless_reality" "VLESS + REALITY + TCP" \
+      3>&1 1>&2 2>&3)"
+    echo "${choice:-vmess_ws_tls}"
+    return 0
+  fi
+
+  echo "请选择 Xray 协议："
+  echo "1) vmess + ws + tls (默认)"
+  echo "2) vless + reality + tcp"
+  local pick=""
+  while true; do
+    read -r -p "输入 1 或 2 [1]: " pick
+    pick="${pick:-1}"
+    case "$pick" in
+      1) echo "vmess_ws_tls"; return 0 ;;
+      2) echo "vless_reality"; return 0 ;;
+      *) echo "请输入 1 或 2" ;;
+    esac
+  done
+}
+
+menu_yes_no() {
+  local title="$1"
+  local text="$2"
+  local default_yes="$3"
+  if [[ "$USE_WHIPTAIL" == "true" ]]; then
+    if [[ "$default_yes" == "y" ]]; then
+      if whiptail --title "$title" --yesno "$text" 10 70 --defaultno 3>&1 1>&2 2>&3; then
+        echo "true"
+      else
+        echo "false"
+      fi
+    else
+      if whiptail --title "$title" --yesno "$text" 10 70 3>&1 1>&2 2>&3; then
+        echo "true"
+      else
+        echo "false"
+      fi
+    fi
+    return 0
+  fi
+
+  ask_yes_no "$text" "$default_yes"
+}
+
 ask_non_empty() {
   local prompt="$1" v=""
   while true; do
@@ -217,19 +274,7 @@ interactive_wizard_if_needed() {
   echo "===== 交互向导 ====="
 
   if [[ -z "$XRAY_MODE" ]]; then
-    echo "请选择 Xray 协议："
-    echo "1) vmess + ws + tls (默认)"
-    echo "2) vless + reality + tcp"
-    local pick=""
-    while true; do
-      read -r -p "输入 1 或 2 [1]: " pick
-      pick="${pick:-1}"
-      case "$pick" in
-        1) XRAY_MODE="vmess_ws_tls"; break ;;
-        2) XRAY_MODE="vless_reality"; break ;;
-        *) echo "请输入 1 或 2" ;;
-      esac
-    done
+    XRAY_MODE="$(menu_xray_mode)"
   fi
 
   if [[ -z "$XRAY_PORT" ]]; then
@@ -237,11 +282,11 @@ interactive_wizard_if_needed() {
   fi
 
   if [[ -z "$ENABLE_METATUBE" ]]; then
-    ENABLE_METATUBE="$(ask_yes_no '是否安装 MetaTube + Postgres?' 'n')"
+    ENABLE_METATUBE="$(menu_yes_no 'MetaTube' '是否安装 MetaTube + Postgres?' 'n')"
   fi
 
   if [[ -z "$ENABLE_PLAYWRIGHT" ]]; then
-    ENABLE_PLAYWRIGHT="$(ask_yes_no '是否配置 Playwright 反向代理入口?' 'n')"
+    ENABLE_PLAYWRIGHT="$(menu_yes_no 'Playwright' '是否配置 Playwright 反向代理入口?' 'n')"
   fi
 
   if [[ "$ENABLE_METATUBE" == "true" || "$ENABLE_PLAYWRIGHT" == "true" || "$XRAY_MODE" == "vmess_ws_tls" ]]; then
@@ -260,7 +305,7 @@ interactive_wizard_if_needed() {
   fi
 
   if [[ -z "$ENABLE_WATCHTOWER" ]]; then
-    ENABLE_WATCHTOWER="$(ask_yes_no '是否安装 Watchtower?' 'y')"
+    ENABLE_WATCHTOWER="$(menu_yes_no 'Watchtower' '是否安装 Watchtower?' 'y')"
   fi
 }
 
@@ -772,6 +817,7 @@ main() {
   check_os
 
   resolve_target_user
+  init_ui_mode
   interactive_wizard_if_needed
   validate_inputs
 
