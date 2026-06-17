@@ -5,6 +5,11 @@ cat > /root/install-xray-xhttp-reality.sh <<'SCRIPT'
 #!/usr/bin/env bash
 set -euo pipefail
 
+if [ "$(id -u)" -ne 0 ]; then
+  echo "请用 root 运行：sudo -i"
+  exit 1
+fi
+
 PORT="${PORT:-443}"
 XHTTP_PATH="${XHTTP_PATH:-/xhttp}"
 SNI="${SNI:-dash.cloudflare.com}"
@@ -12,7 +17,7 @@ TARGET="${TARGET:-dash.cloudflare.com:443}"
 
 echo "==== 安装依赖 ===="
 apt-get update
-apt-get install -y curl wget socat openssl ca-certificates
+apt-get install -y curl wget socat openssl ca-certificates gnupg lsb-release unzip tar
 
 echo "==== 安装官方 Xray ===="
 bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
@@ -148,6 +153,9 @@ echo "配置文件：/usr/local/etc/xray/config.json"
 echo "客户端信息：/root/xhttp-reality-info.txt"
 echo "查看状态：systemctl status xray --no-pager"
 echo "查看日志：journalctl -u xray -f"
+echo "查看端口：ss -lntp | grep $PORT"
 SCRIPT
 
 bash /root/install-xray-xhttp-reality.sh
+
+cat /root/xhttp-reality-info.txt
