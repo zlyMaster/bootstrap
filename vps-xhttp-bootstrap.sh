@@ -1,6 +1,3 @@
-apt-get update
-apt-get install -y curl wget socat openssl ca-certificates
-
 cat > /root/install-xray-xhttp-reality.sh <<'SCRIPT'
 #!/usr/bin/env bash
 set -euo pipefail
