@@ -3,12 +3,14 @@ set -euo pipefail
 
 SCRIPT_NAME="$(basename "$0")"
 
-TIMEZONE="Asia/Shanghai"
+TIMEZONE="${TIMEZONE:-Asia/Shanghai}"
 TARGET_USER=""
 USER_PASSWORD=""
 BASE_DOMAIN=""
 
-XRAY_MODE="" # vmess_ws_tls | vless_reality
+# Recommended default for daily VPS with domain:
+# vless_ws_tls = VLESS + WebSocket + TLS via Caddy
+XRAY_MODE="" # vless_ws_tls | vless_xhttp_tls | vless_reality | vmess_ws_tls
 XRAY_PORT=""
 
 ENABLE_METATUBE=""
@@ -18,13 +20,15 @@ PLAYWRIGHT_PORT=""
 ENABLE_WATCHTOWER=""
 TCP_CC="bbr" # bbr | cubic | reno
 
-REALITY_SERVER_NAME="www.cloudflare.com"
-REALITY_DEST="www.cloudflare.com:443"
+REALITY_SERVER_NAME="${REALITY_SERVER_NAME:-www.cloudflare.com}"
+REALITY_TARGET="${REALITY_TARGET:-www.cloudflare.com:443}"
 REALITY_UUID=""
 REALITY_SHORT_ID=""
 REALITY_PRIVATE_KEY=""
 REALITY_PUBLIC_KEY=""
 
+VLESS_UUID=""
+VLESS_PATH=""
 VMESS_UUID=""
 VMESS_PATH=""
 
@@ -45,21 +49,27 @@ Usage:
   sudo bash ${SCRIPT_NAME} [options]
 
 Options:
-  -h, --help                       Show help
-  --username <name>                Target Linux user
-  --xray-mode <vmess_ws_tls|vless_reality>
-  --xray-port <port>               Fixed xray inbound port
-  --base-domain <domain>           Base domain (required for vmess_ws_tls/metatube/playwright)
+  -h, --help                         Show help
+  --username <name>                  Target Linux user
+  --xray-mode <vless_ws_tls|vless_xhttp_tls|vless_reality|vmess_ws_tls>
+  --xray-port <port>                 Fixed Xray inbound port
+  --base-domain <domain>             Base domain, e.g. jp.server.example.com
   --enable-metatube <true|false>
   --metatube-token <token>
   --enable-playwright <true|false>
   --playwright-port <port>
   --enable-watchtower <true|false>
-  --tcp-cc <bbr|cubic|reno>       TCP congestion control (default: bbr)
+  --tcp-cc <bbr|cubic|reno>          TCP congestion control, default: bbr
+
+Recommended:
+  Daily VPS with domain: --xray-mode vless_ws_tls --base-domain example.com
+  New clients + domain: --xray-mode vless_xhttp_tls --base-domain example.com
+  No domain/direct IP:  --xray-mode vless_reality
 
 Notes:
-  - No arguments => forced interactive wizard.
-  - Baseline steps always executed: user + XDG + xray + firewall.
+  - No arguments => interactive wizard.
+  - Baseline steps always executed: user + XDG dirs + Xray + firewall + TCP CC.
+  - Domain modes use Caddy on Docker for HTTPS certificates and reverse proxy.
 USAGE
 }
 
@@ -177,25 +187,31 @@ init_ui_mode() {
 menu_xray_mode() {
   local choice
   if [[ "$USE_WHIPTAIL" == "true" ]]; then
-    choice="$(whiptail --title "Xray 协议选择" --menu "请选择 Xray 协议" 15 70 2 \
-      "vmess_ws_tls" "VMess + WS + TLS（默认）" \
-      "vless_reality" "VLESS + REALITY + TCP" \
+    choice="$(whiptail --title "Xray 协议选择" --menu "请选择 Xray 协议" 18 78 4 \
+      "vless_ws_tls" "VLESS + WS + TLS（默认，日常有域名推荐）" \
+      "vless_xhttp_tls" "VLESS + XHTTP + TLS（新客户端/进阶）" \
+      "vless_reality" "VLESS + REALITY + TCP Vision（无域名/直连）" \
+      "vmess_ws_tls" "VMess + WS + TLS（旧客户端兼容）" \
       3>&1 1>&2 2>&3)"
-    echo "${choice:-vmess_ws_tls}"
+    echo "${choice:-vless_ws_tls}"
     return 0
   fi
 
   echo "请选择 Xray 协议："
-  echo "1) vmess + ws + tls (默认)"
-  echo "2) vless + reality + tcp"
+  echo "1) vless + ws + tls       (默认，日常有域名推荐)"
+  echo "2) vless + xhttp + tls    (新客户端/进阶)"
+  echo "3) vless + reality + tcp  (无域名/直连)"
+  echo "4) vmess + ws + tls       (旧客户端兼容)"
   local pick=""
   while true; do
-    read -r -p "输入 1 或 2 [1]: " pick
+    read -r -p "输入 1-4 [1]: " pick
     pick="${pick:-1}"
     case "$pick" in
-      1) echo "vmess_ws_tls"; return 0 ;;
-      2) echo "vless_reality"; return 0 ;;
-      *) echo "请输入 1 或 2" ;;
+      1) echo "vless_ws_tls"; return 0 ;;
+      2) echo "vless_xhttp_tls"; return 0 ;;
+      3) echo "vless_reality"; return 0 ;;
+      4) echo "vmess_ws_tls"; return 0 ;;
+      *) echo "请输入 1-4" ;;
     esac
   done
 }
@@ -206,13 +222,13 @@ menu_yes_no() {
   local default_yes="$3"
   if [[ "$USE_WHIPTAIL" == "true" ]]; then
     if [[ "$default_yes" == "y" ]]; then
-      if whiptail --title "$title" --yesno "$text" 10 70 --defaultno 3>&1 1>&2 2>&3; then
+      if whiptail --title "$title" --yesno "$text" 10 70 3>&1 1>&2 2>&3; then
         echo "true"
       else
         echo "false"
       fi
     else
-      if whiptail --title "$title" --yesno "$text" 10 70 3>&1 1>&2 2>&3; then
+      if whiptail --title "$title" --yesno "$text" 10 70 --defaultno 3>&1 1>&2 2>&3; then
         echo "true"
       else
         echo "false"
@@ -284,7 +300,7 @@ interactive_wizard_if_needed() {
   fi
 
   if [[ -z "$XRAY_PORT" ]]; then
-    read -r -p "Xray 端口（留空自动随机）: " XRAY_PORT
+    read -r -p "Xray 内部/直连端口（留空自动随机）: " XRAY_PORT
   fi
 
   if [[ -z "$ENABLE_METATUBE" ]]; then
@@ -295,7 +311,7 @@ interactive_wizard_if_needed() {
     ENABLE_PLAYWRIGHT="$(menu_yes_no 'Playwright' '是否配置 Playwright 反向代理入口?' 'n')"
   fi
 
-  if [[ "$ENABLE_METATUBE" == "true" || "$ENABLE_PLAYWRIGHT" == "true" || "$XRAY_MODE" == "vmess_ws_tls" ]]; then
+  if requires_base_domain; then
     if [[ -z "$BASE_DOMAIN" ]]; then
       BASE_DOMAIN="$(ask_non_empty '请输入基础域名（如 jp.server.master.zeayii.org）: ')"
     fi
@@ -315,13 +331,21 @@ interactive_wizard_if_needed() {
   fi
 }
 
+requires_base_domain() {
+  [[ "$XRAY_MODE" == "vless_ws_tls" || "$XRAY_MODE" == "vless_xhttp_tls" || "$XRAY_MODE" == "vmess_ws_tls" || "$ENABLE_METATUBE" == "true" || "$ENABLE_PLAYWRIGHT" == "true" ]]
+}
+
+uses_caddy() {
+  [[ "$XRAY_MODE" == "vless_ws_tls" || "$XRAY_MODE" == "vless_xhttp_tls" || "$XRAY_MODE" == "vmess_ws_tls" || "$ENABLE_METATUBE" == "true" || "$ENABLE_PLAYWRIGHT" == "true" ]]
+}
+
 validate_inputs() {
   [[ -n "$TARGET_USER" ]] || { err "目标用户名为空"; exit 1; }
 
   case "$XRAY_MODE" in
-    vmess_ws_tls|vless_reality) ;;
-    "") XRAY_MODE="vmess_ws_tls" ;;
-    *) err "--xray-mode 仅支持 vmess_ws_tls 或 vless_reality"; exit 1 ;;
+    vless_ws_tls|vless_xhttp_tls|vless_reality|vmess_ws_tls) ;;
+    "") XRAY_MODE="vless_ws_tls" ;;
+    *) err "--xray-mode 仅支持 vless_ws_tls/vless_xhttp_tls/vless_reality/vmess_ws_tls"; exit 1 ;;
   esac
 
   if [[ -n "$XRAY_PORT" ]] && ! is_valid_port "$XRAY_PORT"; then
@@ -342,8 +366,8 @@ validate_inputs() {
     *) err "--tcp-cc 仅支持 bbr/cubic/reno"; exit 1 ;;
   esac
 
-  if [[ "$XRAY_MODE" == "vmess_ws_tls" || "$ENABLE_METATUBE" == "true" || "$ENABLE_PLAYWRIGHT" == "true" ]]; then
-    [[ -n "$BASE_DOMAIN" ]] || { err "需要 --base-domain"; exit 1; }
+  if requires_base_domain; then
+    [[ -n "$BASE_DOMAIN" ]] || { err "当前配置需要 --base-domain"; exit 1; }
   fi
 
   if [[ "$ENABLE_METATUBE" == "true" ]]; then
@@ -355,33 +379,23 @@ validate_inputs() {
   fi
 }
 
-configure_tcp_cc() {
-  log "配置 TCP 拥塞控制: ${TCP_CC}"
-
-  cat > /etc/sysctl.d/99-bootstrap-net.conf <<EOFCC
-net.core.default_qdisc=fq
-net.ipv4.tcp_congestion_control=${TCP_CC}
-EOFCC
-
-  sysctl --system >/dev/null
-}
-
 install_base_packages() {
   log "安装基础依赖"
   export DEBIAN_FRONTEND=noninteractive
   apt-get update -y
   apt-get install -y --no-install-recommends \
     ca-certificates curl wget gnupg lsb-release \
-    tar unzip xz-utils jq qrencode openssl passwd ufw
+    tar unzip xz-utils jq qrencode openssl passwd ufw \
+    iproute2 procps whiptail
 }
 
 set_timezone() {
   log "设置时区 ${TIMEZONE}"
   if command -v timedatectl >/dev/null 2>&1; then
-    timedatectl set-timezone "$TIMEZONE"
+    timedatectl set-timezone "$TIMEZONE" || true
   else
     ln -sf "/usr/share/zoneinfo/${TIMEZONE}" /etc/localtime
-    dpkg-reconfigure -f noninteractive tzdata
+    dpkg-reconfigure -f noninteractive tzdata || true
   fi
 }
 
@@ -429,6 +443,12 @@ pick_free_port() {
 
 random_hex() { openssl rand -hex "${1:-16}" | tr -d '\n'; }
 
+urlencode_path() {
+  local s="$1"
+  s="${s//\//%2F}"
+  echo "$s"
+}
+
 detect_public_ip() {
   local ip=""
   ip="$(curl -4fsSL --max-time 8 https://api.ipify.org || true)"
@@ -437,24 +457,127 @@ detect_public_ip() {
   echo "$ip"
 }
 
-install_xray() {
-  log "安装 Xray"
-  bash <(curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh) install
+configure_tcp_cc() {
+  log "配置 TCP 拥塞控制: ${TCP_CC}"
+
+  cat > /etc/sysctl.d/99-bootstrap-net.conf <<EOFCC
+net.core.default_qdisc=fq
+net.ipv4.tcp_congestion_control=${TCP_CC}
+EOFCC
+
+  sysctl --system >/dev/null || true
 }
 
-configure_xray_vless_reality() {
-  REALITY_UUID="$(cat /proc/sys/kernel/random/uuid)"
-  REALITY_SHORT_ID="$(random_hex 4)"
+install_xray() {
+  log "安装 Xray"
+  bash -c "$(curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
+}
 
+generate_reality_keys() {
   local xray_bin keys
   xray_bin="$(command -v xray || true)"
   [[ -x "$xray_bin" ]] || xray_bin="/usr/local/bin/xray"
 
   keys="$(${xray_bin} x25519 2>/dev/null | tr -d '\r' || true)"
-  REALITY_PRIVATE_KEY="$(echo "$keys" | sed -nE 's/^[[:space:]]*Private[[:space:]_]*[Kk]ey:[[:space:]]*([A-Za-z0-9+/_=-]+).*/\1/p' | head -n1)"
-  REALITY_PUBLIC_KEY="$(echo "$keys" | sed -nE 's/^[[:space:]]*(Public[[:space:]_]*[Kk]ey|Password \(PublicKey\)):[[:space:]]*([A-Za-z0-9+/_=-]+).*/\2/p' | head -n1)"
+  REALITY_PRIVATE_KEY="$(printf '%s\n' "$keys" | awk -F': *' '/^Private key[[:space:]]*:/ || /^PrivateKey[[:space:]]*:/ {print $2; exit}')"
+  REALITY_PUBLIC_KEY="$(printf '%s\n' "$keys" | awk -F': *' '/^Public key[[:space:]]*:/ || /^PublicKey[[:space:]]*:/ || /^Password/ {print $2; exit}' | awk '{print $1}')"
 
-  [[ -n "$REALITY_PRIVATE_KEY" && -n "$REALITY_PUBLIC_KEY" ]] || { err "生成 REALITY 密钥失败"; exit 1; }
+  [[ -n "$REALITY_PRIVATE_KEY" && -n "$REALITY_PUBLIC_KEY" ]] || {
+    err "生成 REALITY 密钥失败"
+    echo "$keys" >&2
+    exit 1
+  }
+}
+
+configure_xray_vless_ws_tls() {
+  VLESS_UUID="$(cat /proc/sys/kernel/random/uuid)"
+  VLESS_PATH="/$(random_hex 6)"
+
+  cat > /usr/local/etc/xray/config.json <<JSON
+{
+  "log": { "loglevel": "warning" },
+  "inbounds": [
+    {
+      "listen": "127.0.0.1",
+      "port": ${XRAY_PORT},
+      "protocol": "vless",
+      "settings": {
+        "clients": [
+          {
+            "id": "${VLESS_UUID}"
+          }
+        ],
+        "decryption": "none"
+      },
+      "streamSettings": {
+        "network": "ws",
+        "wsSettings": {
+          "path": "${VLESS_PATH}"
+        }
+      }
+    }
+  ],
+  "outbounds": [
+    {
+      "protocol": "freedom",
+      "tag": "direct"
+    }
+  ]
+}
+JSON
+
+  local encoded_path
+  encoded_path="$(urlencode_path "$VLESS_PATH")"
+  XRAY_SHARE_LINK="vless://${VLESS_UUID}@xray.${BASE_DOMAIN}:443?encryption=none&security=tls&sni=xray.${BASE_DOMAIN}&fp=chrome&type=ws&host=xray.${BASE_DOMAIN}&path=${encoded_path}#xray-vless-ws-tls"
+}
+
+configure_xray_vless_xhttp_tls() {
+  VLESS_UUID="$(cat /proc/sys/kernel/random/uuid)"
+  VLESS_PATH="/$(random_hex 6)"
+
+  cat > /usr/local/etc/xray/config.json <<JSON
+{
+  "log": { "loglevel": "warning" },
+  "inbounds": [
+    {
+      "listen": "127.0.0.1",
+      "port": ${XRAY_PORT},
+      "protocol": "vless",
+      "settings": {
+        "clients": [
+          {
+            "id": "${VLESS_UUID}"
+          }
+        ],
+        "decryption": "none"
+      },
+      "streamSettings": {
+        "network": "xhttp",
+        "xhttpSettings": {
+          "path": "${VLESS_PATH}",
+          "mode": "auto"
+        }
+      }
+    }
+  ],
+  "outbounds": [
+    {
+      "protocol": "freedom",
+      "tag": "direct"
+    }
+  ]
+}
+JSON
+
+  local encoded_path
+  encoded_path="$(urlencode_path "$VLESS_PATH")"
+  XRAY_SHARE_LINK="vless://${VLESS_UUID}@xray.${BASE_DOMAIN}:443?encryption=none&security=tls&sni=xray.${BASE_DOMAIN}&fp=chrome&type=xhttp&host=xray.${BASE_DOMAIN}&path=${encoded_path}&mode=auto#xray-vless-xhttp-tls"
+}
+
+configure_xray_vless_reality() {
+  REALITY_UUID="$(cat /proc/sys/kernel/random/uuid)"
+  REALITY_SHORT_ID="$(random_hex 4)"
+  generate_reality_keys
 
   cat > /usr/local/etc/xray/config.json <<JSON
 {
@@ -465,7 +588,12 @@ configure_xray_vless_reality() {
       "port": ${XRAY_PORT},
       "protocol": "vless",
       "settings": {
-        "clients": [{ "id": "${REALITY_UUID}", "flow": "xtls-rprx-vision" }],
+        "clients": [
+          {
+            "id": "${REALITY_UUID}",
+            "flow": "xtls-rprx-vision"
+          }
+        ],
         "decryption": "none"
       },
       "streamSettings": {
@@ -473,16 +601,24 @@ configure_xray_vless_reality() {
         "security": "reality",
         "realitySettings": {
           "show": false,
-          "dest": "${REALITY_DEST}",
-          "xver": 0,
-          "serverNames": ["${REALITY_SERVER_NAME}"],
+          "target": "${REALITY_TARGET}",
+          "serverNames": [
+            "${REALITY_SERVER_NAME}"
+          ],
           "privateKey": "${REALITY_PRIVATE_KEY}",
-          "shortIds": ["${REALITY_SHORT_ID}"]
+          "shortIds": [
+            "${REALITY_SHORT_ID}"
+          ]
         }
       }
     }
   ],
-  "outbounds": [{ "protocol": "freedom" }]
+  "outbounds": [
+    {
+      "protocol": "freedom",
+      "tag": "direct"
+    }
+  ]
 }
 JSON
 
@@ -502,19 +638,31 @@ configure_xray_vmess_ws_tls() {
       "port": ${XRAY_PORT},
       "protocol": "vmess",
       "settings": {
-        "clients": [{ "id": "${VMESS_UUID}", "alterId": 0 }]
+        "clients": [
+          {
+            "id": "${VMESS_UUID}",
+            "alterId": 0
+          }
+        ]
       },
       "streamSettings": {
         "network": "ws",
-        "wsSettings": { "path": "${VMESS_PATH}" }
+        "wsSettings": {
+          "path": "${VMESS_PATH}"
+        }
       }
     }
   ],
-  "outbounds": [{ "protocol": "freedom" }]
+  "outbounds": [
+    {
+      "protocol": "freedom",
+      "tag": "direct"
+    }
+  ]
 }
 JSON
 
-  XRAY_SHARE_LINK="vmess://$(printf '{\"v\":\"2\",\"ps\":\"xray-vmess-ws-tls\",\"add\":\"xray.%s\",\"port\":\"443\",\"id\":\"%s\",\"aid\":\"0\",\"scy\":\"auto\",\"net\":\"ws\",\"type\":\"none\",\"host\":\"xray.%s\",\"path\":\"%s\",\"tls\":\"tls\",\"sni\":\"xray.%s\",\"alpn\":\"\"}' "$BASE_DOMAIN" "$VMESS_UUID" "$BASE_DOMAIN" "$VMESS_PATH" "$BASE_DOMAIN" | base64 -w0)"
+  XRAY_SHARE_LINK="vmess://$(printf '{"v":"2","ps":"xray-vmess-ws-tls","add":"xray.%s","port":"443","id":"%s","aid":"0","scy":"auto","net":"ws","type":"none","host":"xray.%s","path":"%s","tls":"tls","sni":"xray.%s","alpn":""}' "$BASE_DOMAIN" "$VMESS_UUID" "$BASE_DOMAIN" "$VMESS_PATH" "$BASE_DOMAIN" | base64 -w0)"
 }
 
 configure_xray() {
@@ -523,6 +671,8 @@ configure_xray() {
   [[ -n "$XRAY_PORT" ]] || XRAY_PORT="$(pick_free_port)"
 
   case "$XRAY_MODE" in
+    vless_ws_tls) configure_xray_vless_ws_tls ;;
+    vless_xhttp_tls) configure_xray_vless_xhttp_tls ;;
     vless_reality) configure_xray_vless_reality ;;
     vmess_ws_tls) configure_xray_vmess_ws_tls ;;
   esac
@@ -585,14 +735,14 @@ networks:
 YAML
 
   {
-    echo "{" 
-    echo "  email admin@${BASE_DOMAIN}" 
-    echo "}" 
+    echo "{"
+    echo "  email admin@${BASE_DOMAIN}"
+    echo "}"
     echo
 
-    if [[ "$XRAY_MODE" == "vmess_ws_tls" ]]; then
+    if [[ "$XRAY_MODE" == "vless_ws_tls" || "$XRAY_MODE" == "vless_xhttp_tls" || "$XRAY_MODE" == "vmess_ws_tls" ]]; then
       echo "xray.${BASE_DOMAIN} {"
-      echo "  reverse_proxy 127.0.0.1:${XRAY_PORT}"
+      echo "  reverse_proxy host.docker.internal:${XRAY_PORT}"
       echo "}"
       echo
     fi
@@ -608,6 +758,7 @@ YAML
       echo "playwright.service.${BASE_DOMAIN} {"
       echo "  reverse_proxy host.docker.internal:${PLAYWRIGHT_PORT}"
       echo "}"
+      echo
     fi
   } > "$caddyfile"
 
@@ -723,9 +874,9 @@ precheck_conflicts() {
     fi
   fi
 
-  if [[ "$XRAY_MODE" == "vmess_ws_tls" || "$ENABLE_METATUBE" == "true" || "$ENABLE_PLAYWRIGHT" == "true" ]]; then
+  if uses_caddy; then
     if ss -lnt '( sport = :443 )' | grep -q ':443'; then
-      if ! docker ps --format '{{.Names}}' | grep -q '^caddy$'; then
+      if ! docker ps --format '{{.Names}}' 2>/dev/null | grep -q '^caddy$'; then
         err "443 端口已被其他服务占用，无法部署 caddy"
         exit 1
       fi
@@ -746,7 +897,9 @@ configure_ufw() {
   ufw default allow outgoing >/dev/null
   ufw allow 22/tcp >/dev/null
   ufw allow 443/tcp >/dev/null
-  ufw allow "${XRAY_PORT}/tcp" >/dev/null
+  if [[ "$XRAY_MODE" == "vless_reality" ]]; then
+    ufw allow "${XRAY_PORT}/tcp" >/dev/null
+  fi
   if [[ "$ENABLE_PLAYWRIGHT" == "true" ]]; then
     ufw allow "${PLAYWRIGHT_PORT}/tcp" >/dev/null
   fi
@@ -763,7 +916,7 @@ print_stage_summary() {
   echo "[Xray]"
   echo "mode=${XRAY_MODE}"
   echo "port=${XRAY_PORT:-random}"
-  if [[ "$XRAY_MODE" == "vmess_ws_tls" ]]; then
+  if [[ "$XRAY_MODE" == "vless_ws_tls" || "$XRAY_MODE" == "vless_xhttp_tls" || "$XRAY_MODE" == "vmess_ws_tls" ]]; then
     echo "domain=xray.${BASE_DOMAIN}"
   fi
   echo
@@ -787,7 +940,7 @@ print_stage_summary() {
   echo "tcp_cc=${TCP_CC}"
   echo
   echo "[防火墙]"
-  echo "allow=22/tcp,443/tcp,${XRAY_PORT:-dynamic}/tcp$( [[ "$ENABLE_PLAYWRIGHT" == "true" ]] && printf ',%s/tcp' "$PLAYWRIGHT_PORT" )"
+  echo "allow=22/tcp,443/tcp$( [[ "$XRAY_MODE" == "vless_reality" ]] && printf ',%s/tcp' "$XRAY_PORT" )$( [[ "$ENABLE_PLAYWRIGHT" == "true" ]] && printf ',%s/tcp' "$PLAYWRIGHT_PORT" )"
   echo "=============================="
   echo
 }
@@ -812,7 +965,7 @@ share_link=${XRAY_SHARE_LINK}
 
 [Domain]
 base_domain=${BASE_DOMAIN}
-xray_domain=$( [[ "$XRAY_MODE" == "vmess_ws_tls" ]] && echo "xray.${BASE_DOMAIN}" || echo "" )
+xray_domain=$( [[ "$XRAY_MODE" == "vless_ws_tls" || "$XRAY_MODE" == "vless_xhttp_tls" || "$XRAY_MODE" == "vmess_ws_tls" ]] && echo "xray.${BASE_DOMAIN}" || echo "" )
 metatube_domain=$( [[ "$ENABLE_METATUBE" == "true" ]] && echo "metatube.${BASE_DOMAIN}" || echo "" )
 playwright_domain=$( [[ "$ENABLE_PLAYWRIGHT" == "true" ]] && echo "playwright.service.${BASE_DOMAIN}" || echo "" )
 
@@ -856,7 +1009,7 @@ main() {
 
   precheck_conflicts
 
-  if [[ "$XRAY_MODE" == "vmess_ws_tls" || "$ENABLE_METATUBE" == "true" || "$ENABLE_PLAYWRIGHT" == "true" ]]; then
+  if uses_caddy; then
     install_docker_and_compose
     ensure_edge_network
   fi
@@ -866,7 +1019,7 @@ main() {
   install_xray
   configure_xray
 
-  if [[ "$XRAY_MODE" == "vmess_ws_tls" || "$ENABLE_METATUBE" == "true" || "$ENABLE_PLAYWRIGHT" == "true" ]]; then
+  if uses_caddy; then
     write_caddy_stack
   fi
 
