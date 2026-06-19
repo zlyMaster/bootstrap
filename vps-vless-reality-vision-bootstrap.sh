@@ -28,6 +28,24 @@ if ! command -v apt-get >/dev/null 2>&1; then
   exit 1
 fi
 
+echo
+echo "==== 开启并持久化 BBR ===="
+modprobe tcp_bbr 2>/dev/null || true
+echo tcp_bbr >/etc/modules-load.d/bbr.conf
+
+cat >/etc/sysctl.d/99-bbr.conf <<'EOF'
+net.core.default_qdisc=fq
+net.ipv4.tcp_congestion_control=bbr
+EOF
+
+sysctl --system
+
+echo
+echo "==== 检查 BBR 状态 ===="
+sysctl net.ipv4.tcp_congestion_control
+sysctl net.ipv4.tcp_available_congestion_control
+sysctl net.core.default_qdisc
+
 PORT="${PORT:-443}"
 SNI="${SNI:-www.microsoft.com}"
 TARGET="${TARGET:-${SNI}:443}"
