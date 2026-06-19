@@ -208,4 +208,4 @@ vps-media-bootstrap.sh
 
 ## License
 
-个人 VPS 搭建脚本。  
+本项目基于 MIT License 开源，详情请查看 [LICENSE](./LICENSE)。
