@@ -7,6 +7,24 @@ if [ "$(id -u)" -ne 0 ]; then
   exit 1
 fi
 
+echo
+echo "==== 开启并持久化 BBR ===="
+modprobe tcp_bbr 2>/dev/null || true
+echo tcp_bbr >/etc/modules-load.d/bbr.conf
+
+cat >/etc/sysctl.d/99-bbr.conf <<'EOF'
+net.core.default_qdisc=fq
+net.ipv4.tcp_congestion_control=bbr
+EOF
+
+sysctl --system
+
+echo
+echo "==== 检查 BBR 状态 ===="
+sysctl net.ipv4.tcp_congestion_control
+sysctl net.ipv4.tcp_available_congestion_control
+sysctl net.core.default_qdisc
+
 PORT="${PORT:-443}"
 XHTTP_PATH="${XHTTP_PATH:-/xhttp}"
 SNI="${SNI:-dash.cloudflare.com}"
