@@ -1,4 +1,3 @@
-```bash
 #!/usr/bin/env bash
 set -euo pipefail
 
@@ -278,4 +277,3 @@ echo "服务端配置文件：${XRAY_CONFIG}"
 echo
 echo "注意：如果 VPS 厂商有安全组，请在厂商面板额外放行 TCP ${PORT}"
 echo "============================================================"
-```
