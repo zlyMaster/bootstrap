@@ -1,3 +1,4 @@
+```bash
 #!/usr/bin/env bash
 set -euo pipefail
 
@@ -15,7 +16,7 @@ set -euo pipefail
 #   SERVER_IP=1.2.3.4
 #
 # 示例：
-#   PORT=443 SNI=www.microsoft.com TARGET=www.microsoft.com:443 bash install-xray-reality-vision.sh
+#   PORT=443 SNI=www.microsoft.com TARGET=www.microsoft.com:443 bash vps-vless-reality-vision-bootstrap.sh
 # ============================================================
 
 if [ "$(id -u)" -ne 0 ]; then
@@ -72,14 +73,14 @@ UUID="$("${XRAY_BIN}" uuid)"
 KEYS="$("${XRAY_BIN}" x25519)"
 
 PRIVATE_KEY="$(printf '%s\n' "${KEYS}" | awk -F': *' '
-  /^Private key[[:space:]]*:/ || /^PrivateKey[[:space:]]*:/ {
+  /PrivateKey/ || /Private key/ {
     print $2
     exit
   }
-')"
+' | awk '{print $1}')"
 
 PUBLIC_KEY="$(printf '%s\n' "${KEYS}" | awk -F': *' '
-  /^Public key[[:space:]]*:/ || /^PublicKey[[:space:]]*:/ || /^Password[[:space:]]*:/ {
+  /PublicKey/ || /Public key/ {
     print $2
     exit
   }
@@ -120,7 +121,7 @@ fi
 
 if [ -z "${SERVER_IP:-}" ]; then
   echo "无法自动获取服务器 IP，请手动指定："
-  echo "  SERVER_IP=你的服务器IP bash install-xray-reality-vision.sh"
+  echo "  SERVER_IP=你的服务器IP bash vps-vless-reality-vision-bootstrap.sh"
   exit 1
 fi
 
@@ -277,3 +278,4 @@ echo "服务端配置文件：${XRAY_CONFIG}"
 echo
 echo "注意：如果 VPS 厂商有安全组，请在厂商面板额外放行 TCP ${PORT}"
 echo "============================================================"
+```
