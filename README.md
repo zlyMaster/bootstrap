@@ -39,7 +39,7 @@
 适合日常主力 VPS，尤其是有域名，并且希望通过 Caddy 统一管理 HTTPS 入口的服务器。
 
 ```bash
-apt-get -o DPkg::Lock::Timeout=300 update && apt-get -o DPkg::Lock::Timeout=300 install -y curl ca-certificates && bash <(curl -fsSL https://raw.githubusercontent.com/zlyMaster/bootstrap/main/vps-bootstrap.sh)
+apt-get update && apt-get install -y curl ca-certificates && bash <(curl -fsSL https://raw.githubusercontent.com/zlyMaster/bootstrap/main/vps-master-bootstrap.sh)
 ```
 
 ### VMess + TCP + BBR 流量节点
@@ -55,13 +55,13 @@ VMess + TCP + BBR + fq
 一行安装命令：
 
 ```bash
-apt-get -o DPkg::Lock::Timeout=300 update && apt-get -o DPkg::Lock::Timeout=300 install -y curl ca-certificates && bash <(curl -fsSL https://raw.githubusercontent.com/zlyMaster/bootstrap/main/vps-vmess-tcp-bootstrap.sh)
+apt-get update && apt-get install -y curl ca-certificates && bash <(curl -fsSL https://raw.githubusercontent.com/zlyMaster/bootstrap/main/vps-vmess-tcp-bootstrap.sh)
 ```
 
 如果需要自定义端口，可以使用：
 
 ```bash
-apt-get -o DPkg::Lock::Timeout=300 update && apt-get -o DPkg::Lock::Timeout=300 install -y curl ca-certificates && PORT=8443 bash <(curl -fsSL https://raw.githubusercontent.com/zlyMaster/bootstrap/main/vps-vmess-tcp-bootstrap.sh)
+apt-get update && apt-get install -y curl ca-certificates && PORT=8443 bash <(curl -fsSL https://raw.githubusercontent.com/zlyMaster/bootstrap/main/vps-vmess-tcp-bootstrap.sh)
 ```
 
 支持的环境变量：
@@ -94,13 +94,13 @@ VLESS + TCP + REALITY + Vision
 一行安装命令：
 
 ```bash
-apt-get -o DPkg::Lock::Timeout=300 update && apt-get -o DPkg::Lock::Timeout=300 install -y curl ca-certificates && bash <(curl -fsSL https://raw.githubusercontent.com/zlyMaster/bootstrap/main/vps-vless-reality-vision-bootstrap.sh)
+apt-get update && apt-get install -y curl ca-certificates && bash <(curl -fsSL https://raw.githubusercontent.com/zlyMaster/bootstrap/main/vps-vless-reality-vision-bootstrap.sh)
 ```
 
 如果需要自定义端口、SNI 或 REALITY target，可以使用：
 
 ```bash
-apt-get -o DPkg::Lock::Timeout=300 update && apt-get -o DPkg::Lock::Timeout=300 install -y curl ca-certificates && PORT=443 SNI=www.microsoft.com TARGET=www.microsoft.com:443 bash <(curl -fsSL https://raw.githubusercontent.com/zlyMaster/bootstrap/main/vps-vless-reality-vision-bootstrap.sh)
+apt-get update && apt-get install -y curl ca-certificates && PORT=443 SNI=www.microsoft.com TARGET=www.microsoft.com:443 bash <(curl -fsSL https://raw.githubusercontent.com/zlyMaster/bootstrap/main/vps-vless-reality-vision-bootstrap.sh)
 ```
 
 安装完成后，客户端连接信息会写入：
@@ -114,7 +114,7 @@ apt-get -o DPkg::Lock::Timeout=300 update && apt-get -o DPkg::Lock::Timeout=300 
 适合测试 XHTTP，或者在特定网络环境下验证 XHTTP 传输效果。
 
 ```bash
-apt-get -o DPkg::Lock::Timeout=300 update && apt-get -o DPkg::Lock::Timeout=300 install -y curl ca-certificates && bash <(curl -fsSL https://raw.githubusercontent.com/zlyMaster/bootstrap/main/vps-xhttp-bootstrap.sh)
+apt-get update && apt-get install -y curl ca-certificates && bash <(curl -fsSL https://raw.githubusercontent.com/zlyMaster/bootstrap/main/vps-xhttp-bootstrap.sh)
 ```
 
 ## 协议选择建议
@@ -170,6 +170,9 @@ sysctl net.ipv4.tcp_available_congestion_control
 sysctl net.core.default_qdisc
 ```
 
+## 流媒体解锁检测
+apt-get update && apt-get install -y curl ca-certificates && bash <(curl -L -s check.unlock.media)
+
 ## 后续脚本命名规范
 
 后续新增 VPS 搭建脚本时，建议使用以下命名格式：
@@ -206,4 +209,3 @@ vps-media-bootstrap.sh
 ## License
 
 个人 VPS 搭建脚本。  
-如果后续希望开放给其他人复用，建议补充明确的开源许可证。
