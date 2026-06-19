@@ -171,7 +171,9 @@ sysctl net.core.default_qdisc
 ```
 
 ## 流媒体解锁检测
+```bash
 apt-get update && apt-get install -y curl ca-certificates && bash <(curl -L -s check.unlock.media)
+```
 
 ## 后续脚本命名规范
 
