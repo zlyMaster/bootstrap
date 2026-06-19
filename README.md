@@ -10,7 +10,7 @@
 
 | 脚本 | 使用场景 | 说明 |
 |---|---|---|
-| `vps-bootstrap.sh` | 主力日常 VPS | 综合型 VPS 初始化脚本，适合有域名、使用 Caddy 作为 HTTPS 入口的日常 VPS。 |
+| `vps-master-bootstrap.sh` | 主力日常 VPS | 综合型 VPS 初始化脚本，适合有域名、使用 Caddy 作为 HTTPS 入口的日常 VPS。 |
 | `vps-vmess-tcp-bootstrap.sh` | 流量 VPS / 无域名 VPS / 速度优先 | 安装并配置 `VMess + TCP + BBR + fq`，适合没有域名、追求下载速度和低失败率的流量节点。 |
 | `vps-vless-reality-vision-bootstrap.sh` | VLESS REALITY Vision 节点 | 安装并配置 `VLESS + TCP + REALITY + Vision`，适合作为无域名节点的备用方案或对比测试。 |
 | `vps-xhttp-bootstrap.sh` | XHTTP 实验节点 | 安装并配置 `VLESS + XHTTP + REALITY`，用于特定网络环境或协议测试。 |
