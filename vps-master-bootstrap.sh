@@ -559,7 +559,7 @@ configure_xray() {
       "port": ${XRAY_PORT},
       "protocol": "vless",
       "settings": {
-        "users": [
+        "clients": [
           {
             "id": "${VLESS_UUID}",
             "flow": "xtls-rprx-vision"
